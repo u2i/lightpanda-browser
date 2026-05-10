@@ -579,3 +579,50 @@
   });
 }
 </script>
+
+<script id=cookies_on_upgrade type=module>
+{
+  // Cookies set on the page should ride along with the WebSocket
+  // upgrade request as a Cookie header — same as any other same-origin
+  // HTTP request. Without this, cookie-authenticated WS endpoints
+  // (Phoenix LiveView, anything session-gated) reject the upgrade.
+  //
+  // RFC 6455 §4.1: the upgrade is an HTTP/1.1 request and follows
+  // normal HTTP cookie semantics.
+  // RFC 6265 §5.4: cookies attach to "any HTTP request" matching
+  // the cookie's domain/path; ports are not part of cookie scope, so
+  // a cookie set on 127.0.0.1:9582 attaches to a 127.0.0.1:9584 WS.
+  // Set with path=/ so the cookie applies to the WS server's "/" path
+  // (without an explicit Path attribute, default-path uses the page's
+  // directory which doesn't match the WS endpoint).
+  document.cookie = 'ws_token=session_xyz; path=/';
+
+  // Sanity-check the cookie did land in the jar before opening the WS.
+  testing.expectEqual(true, document.cookie.includes('ws_token=session_xyz'));
+
+  const state = await testing.async();
+  let received = [];
+
+  let ws = new WebSocket('ws://127.0.0.1:9584/');
+
+  ws.addEventListener('open', () => {
+    ws.send('get-cookie');
+  });
+
+  ws.addEventListener('message', (e) => {
+    received.push(e.data);
+    ws.close();
+  });
+
+  ws.addEventListener('close', () => {
+    state.resolve();
+  });
+
+  await state.done(() => {
+    testing.expectEqual(['cookie:ws_token=session_xyz'], received);
+  });
+
+  // Clean up so other tests on this fixture don't see this cookie.
+  document.cookie = 'ws_token=; path=/; Max-Age=0';
+}
+</script>
