@@ -5,9 +5,11 @@ name: fork release
 #   * pushing a tag matching `fork-*` (e.g. `fork-2026-05-10`)
 #   * manual workflow_dispatch from the Actions tab
 #
-# Output: a GitHub Release with three binaries:
-#   * lightpanda-x86_64-linux
-#   * lightpanda-aarch64-linux
+# Output: a GitHub Release with five binaries:
+#   * lightpanda-x86_64-linux        (glibc)
+#   * lightpanda-aarch64-linux       (glibc)
+#   * lightpanda-x86_64-linux-musl   (musl — Alpine, distroless-static, etc.)
+#   * lightpanda-aarch64-linux-musl  (musl)
 #   * lightpanda-aarch64-macos
 #
 # wallabidi (and any other consumer) can then point LIGHTPANDA_PATH at
@@ -37,16 +39,39 @@ jobs:
           - arch: x86_64
             runner: ubuntu-22.04
             cpu_flag: -Dcpu=x86_64
+            libc: gnu
+            suffix: linux
           - arch: aarch64
             runner: ubuntu-22.04-arm
             cpu_flag: -Dcpu=generic
+            libc: gnu
+            suffix: linux
+          # musl variants — built on the same glibc runners by passing
+          # -Dtarget=<arch>-linux-musl to Zig. Reuses the same
+          # libc_v8.a (glibc-built); v8 is a static C++ archive that
+          # doesn't pull libc symbols of its own, so it links cleanly
+          # against a musl target. If a future v8 bump breaks that
+          # assumption we'll need a musl-built libc_v8.a.
+          - arch: x86_64
+            runner: ubuntu-22.04
+            cpu_flag: -Dcpu=x86_64 -Dtarget=x86_64-linux-musl
+            libc: musl
+            suffix: linux-musl
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+            cpu_flag: -Dcpu=generic -Dtarget=aarch64-linux-musl
+            libc: musl
+            suffix: linux-musl
 
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    # musl is experimental — don't fail the whole release if it breaks.
+    continue-on-error: ${{ matrix.libc == 'musl' }}
 
     env:
       ARCH: ${{ matrix.arch }}
       OS: linux
+      SUFFIX: ${{ matrix.suffix }}
 
     steps:
       - uses: actions/checkout@v6
@@ -65,18 +90,33 @@ jobs:
         run: zig build -Dsnapshot_path=../../snapshot.bin -Dprebuilt_v8_path=v8/libc_v8.a -Doptimize=ReleaseFast ${{ matrix.cpu_flag }}
 
       - name: Rename binary
-        run: mv zig-out/bin/lightpanda lightpanda-${{ env.ARCH }}-${{ env.OS }}
+        run: mv zig-out/bin/lightpanda lightpanda-${{ env.ARCH }}-${{ env.SUFFIX }}
+
+      - name: Smoke-check musl linkage
+        if: ${{ matrix.libc == 'musl' }}
+        run: |
+          # Confirm the binary is statically linked (musl Zig targets
+          # default to static). If we later switch to dynamic musl this
+          # check catches an accidental glibc relink.
+          file lightpanda-${{ env.ARCH }}-${{ env.SUFFIX }} | tee /tmp/file.txt
+          grep -E 'statically linked|static-pie' /tmp/file.txt
 
       - name: Upload to release
         uses: ncipollo/release-action@v1
         with:
           allowUpdates: true
-          artifacts: lightpanda-${{ env.ARCH }}-${{ env.OS }}
+          artifacts: lightpanda-${{ env.ARCH }}-${{ env.SUFFIX }}
           tag: ${{ env.RELEASE_TAG }}
           makeLatest: true
           body: |
             Fork build of lightpanda-io/browser with the cookie-on-WS-upgrade patch.
             Built from branch `cookie-on-ws-upgrade`.
+
+            Linux artifacts:
+              * `lightpanda-x86_64-linux`        — glibc (Debian/Ubuntu)
+              * `lightpanda-aarch64-linux`       — glibc
+              * `lightpanda-x86_64-linux-musl`   — musl (Alpine, distroless-static)
+              * `lightpanda-aarch64-linux-musl`  — musl
 
   build-macos:
     runs-on: macos-14
